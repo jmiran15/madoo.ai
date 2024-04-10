@@ -59,7 +59,7 @@ export default function Playground() {
 
   return (
     <div className="grid grid-cols-4 w-screen h-full">
-      <Form method="post" className="col-span-1 p-4">
+      <Form method="post" className="col-span-1 p-4 overflow-y-auto">
         <Fieldset>
           <Legend>Video information</Legend>
           <Text>Enter the information for the video to be generated</Text>

@@ -2,7 +2,6 @@ import { ActionFunctionArgs, json } from "@remix-run/node";
 import { createServerClient, parse, serialize } from "@supabase/ssr";
 
 import { createVideo } from "~/models/video.server";
-import { requireUserId } from "~/session.server";
 
 import {
   Image,
@@ -20,6 +19,7 @@ import {
   batch_size,
 } from "./utils";
 import { combine, merge } from "./video_utils";
+import { createStableDiffusionPrompt } from "./prompts";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { text, aspect_ratio, userId } = await request.json();
@@ -39,7 +39,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   // make sure text is under the character limit
   if (text.length > CHARACTER_LIMIT) {
-    throw Error("Text is too long");
+    throw Error(`Text is too long: ${text.length}`);
   }
 
   const images: Image[] = [];
@@ -69,24 +69,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     )}\nBase style: ${base_style}`,
   );
 
-  const image_consistancies_obj = image_consistancies.reduce(
-    (acc, curr) => {
-      acc[curr.id] = curr;
-      return acc;
-    },
-    {} as Record<
-      string,
-      { name: string; description_of_image: string; id: string }
-    >,
-  );
+  // const image_consistancies_obj = image_consistancies.reduce(
+  //   (acc, curr) => {
+  //     acc[curr.id] = curr;
+  //     return acc;
+  //   },
+  //   {} as Record<string, { name: string; description: string; id: string }>,
+  // );
 
-  console.log(
-    `Image consistancies object: ${JSON.stringify(
-      image_consistancies_obj,
-      null,
-      2,
-    )}`,
-  );
+  // console.log(
+  //   `Image consistancies object: ${JSON.stringify(
+  //     image_consistancies_obj,
+  //     null,
+  //     2,
+  //   )}`,
+  // );
 
   const transcript = await generateTranscript({
     text,
@@ -114,9 +111,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     `Generated audio transcription: ${JSON.stringify(audioTranscription, null, 2)}`,
   );
 
+  // add something in here to generate a coherent story line
+
+  // pass the story line to the image descriptions
   const imageDescriptions = await getImageDescriptions(
     image_consistancies,
-    audioTranscription,
+    audioTranscription.text,
+    audioTranscription.chunks,
   );
 
   console.log(
@@ -139,14 +140,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   for (const imageDescription_batch of imageDescription_batches) {
     const images_batch = await Promise.all(
       imageDescription_batch.map(async (imageDescription) => {
+        const prompt = createStableDiffusionPrompt(
+          image_consistancies,
+          base_style,
+          imageDescription.description,
+        );
+        console.log("Prompt: ", prompt);
         return getStabilityImage({
           start: imageDescription.start,
           end: imageDescription.end,
-          prompt: imageDescription.description,
-          consistancies: imageDescription.references.map(
-            (ref) => image_consistancies_obj[ref],
-          ),
-          base: base_style,
+          prompt,
           supabase,
           aspect_ratio,
         });

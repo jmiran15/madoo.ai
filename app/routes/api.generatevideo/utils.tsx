@@ -1,13 +1,11 @@
 import axios from "axios";
+import cuid from "cuid";
 import FormD from "form-data";
 import OpenAI from "openai";
-import { v4 as uuidv4 } from "uuid";
 
 import {
   base_style_system,
   base_style_user,
-  chunker_system,
-  chunker_user,
   consistancy_system,
   image_insertion_system,
   image_insertion_user,
@@ -21,7 +19,7 @@ export const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-export const CHARACTER_LIMIT = 5000;
+export const CHARACTER_LIMIT = 10000;
 export const elevenlabs_rate_limit = 3;
 export const batch_size = 10;
 
@@ -39,10 +37,9 @@ export const SIZE = "1024x1792";
 export const QUALITY = "hd";
 
 // chat settings
-export const MODEL = "gpt-3.5-turbo-0125";
-// export const MODEL = "gpt-4";
+export const MODEL = "gpt-4-turbo";
 export const TEMP = 0.2;
-export const MAX_TOKENS = 3600; // need to do splitting on intial raw chunk so we don't exceed the max tokens
+export const MAX_TOKENS = null; // need to do splitting on intial raw chunk so we don't exceed the max tokens
 
 // audio settings
 export const AUDIO_MODEL = "whisper-1";
@@ -81,52 +78,12 @@ export interface ImageDescription {
   start: number;
   end: number;
   description: string;
-  references: string[];
 }
 
 export interface Image {
   start: number;
   end: number;
   url: string;
-}
-// should use json outputs and inputs in all of these
-export async function generateChunks(
-  rawText: string,
-): Promise<Chunk[] | { error: string }> {
-  const completion = await openai.chat.completions.create({
-    messages: [
-      {
-        role: "system",
-        content: chunker_system,
-      },
-      {
-        role: "user",
-        content: chunker_user({ query: rawText }),
-      },
-    ],
-    model: MODEL,
-    max_tokens: MAX_TOKENS,
-    temperature: TEMP,
-  });
-
-  try {
-    let chunks: Chunk[] = JSON.parse(
-      String(completion.choices[0].message.content),
-    );
-
-    chunks = chunks.map((chunk) => {
-      const id = uuidv4();
-      return {
-        ...chunk,
-        id,
-      };
-    });
-
-    return chunks;
-  } catch (error) {
-    console.error("Error parsing chunk:", error);
-    return { error: String(error) };
-  }
 }
 
 export async function generateStyle(rawText: string): Promise<string> {
@@ -151,7 +108,7 @@ export async function generateStyle(rawText: string): Promise<string> {
 
 export interface ConsistantCharacter {
   name: string;
-  description_of_image: string;
+  description: string;
   id: string; // used for ref later
 }
 
@@ -181,7 +138,7 @@ export async function generateConsistantCharacters(
     );
 
     consistancies = consistancies.map((cs) => {
-      const id = uuidv4();
+      const id = cuid();
       return {
         ...cs,
         id,
@@ -219,6 +176,7 @@ export async function generateTranscript({ text }: { text: string }): Promise<{
   return { transcript: String(completion.choices[0].message.content) };
 }
 
+// change to replicate fast whisper
 export async function transcribeAudio({
   audioUrl,
 }: {
@@ -256,9 +214,11 @@ export async function transcribeAudio({
 
 export async function getImageDescriptions(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  objects: any,
+  elements: any,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  transcription: any,
+  text: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  chunks: any,
 ): Promise<ImageDescription[] | { error: string }> {
   const completion = await openai.chat.completions.create({
     messages: [
@@ -269,8 +229,9 @@ export async function getImageDescriptions(
       {
         role: "user",
         content: image_insertion_user({
-          objects,
-          transcript: transcription,
+          elements,
+          text,
+          chunks,
         }),
       },
     ],
@@ -302,90 +263,33 @@ export async function getImageDescriptions(
   }
 }
 
-// with dalle
-export async function generateImage({
-  description,
-  style,
-}: {
-  description: string;
-  style: string;
-}) {
-  const image = await openai.images.generate({
-    model: "dall-e-3",
-    quality: QUALITY,
-    size: SIZE,
-    prompt: `HERE IS THE CONTENT DESCRIPTION FOR THE NEW IMAGE:\n${description}\n\nIMAGE STYLE:\n${style}\nThe image should be in a 9:16 aspect ratio. The image should take up the entire aspect ratio!`,
-  });
-
-  // should be able to get url of generated image
-
-  return image.data[0].url;
-}
-
 export function formatTranscribedTranscript(
   transcript: TranscriptionResponse,
-): Partial<Segment>[] {
-  return transcript.segments.map((segment) => ({
-    start: segment.start,
-    end: segment.end,
-    text: segment.text,
-  }));
-}
-
-export function splitStringIntoChunks(
-  raw: string,
-  chunkSize: number,
-): string[] {
-  if (chunkSize <= 0) {
-    throw new Error("Chunk size must be greater than 0.");
-  }
-
-  const chunks: string[] = [];
-  let startIndex = 0;
-
-  while (startIndex < raw.length) {
-    const endIndex = Math.min(startIndex + chunkSize, raw.length);
-    const chunk = raw.substring(startIndex, endIndex);
-    chunks.push(chunk);
-    startIndex += chunkSize;
-  }
-
-  return chunks;
+): { text: string; chunks: Partial<Segment>[] } {
+  return {
+    text: transcript.text,
+    chunks: transcript.segments.map((segment) => ({
+      text: segment.text,
+      timestamp: [segment.start, segment.end],
+    })),
+  };
 }
 
 export async function getStabilityImage({
   start,
   end,
   prompt,
-  consistancies,
-  base,
   supabase,
   aspect_ratio,
 }: {
   start: number;
   end: number;
   prompt: string;
-  consistancies: { name: string; description_of_image: string; id: string }[];
-  base: string;
   supabase: any;
   aspect_ratio: string;
 }) {
-  console.log(
-    `Generating image with prompt: ${`DESCRIPTION OF IMAGE CONTENTS: ${prompt}\n DESCRIPTION OF OBJECTS IN IMAGE: ${consistancies
-      .map(
-        (consistancy) =>
-          `${consistancy.name}: ${consistancy.description_of_image}`,
-      )
-      .join("\n")}\n\nDESCRIPTION OF IMAGE STYLE: ${base}`}`,
-  );
-
   const formData = {
-    prompt: `DESCRIPTION OF IMAGE CONTENTS: ${prompt}\n DESCRIPTION OF OBJECTS IN IMAGE: ${consistancies
-      .map(
-        (consistancy) =>
-          `${consistancy.name}: ${consistancy.description_of_image}`,
-      )
-      .join("\n")}\n\nDESCRIPTION OF IMAGE STYLE: ${base}`,
+    prompt,
     aspect_ratio,
     negative_prompt: video_negative_prompt,
   };
@@ -405,7 +309,7 @@ export async function getStabilityImage({
     // push the file to supabase, and return the url
     // fs.writeFileSync("./lighthouse.png", Buffer.from(response.data));
 
-    const id = uuidv4();
+    const id = cuid();
 
     const { data } = await supabase.storage
       .from("videos")
@@ -476,7 +380,7 @@ export async function generateElevenLabsAudio({
   }
 
   const arrayBuffer = await response.arrayBuffer();
-  const id = uuidv4();
+  const id = cuid();
 
   const { data } = await supabase.storage
     .from("videos")
